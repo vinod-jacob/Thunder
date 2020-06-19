@@ -24,20 +24,28 @@
 namespace WPEFramework {
 namespace Exchange {
 
-    struct IDolby {
+    struct IDolby : virtual public Core::IUnknown {
         enum { ID = ID_DOLBY };
 
         virtual ~IDolby(){};
 
-        enum Output {
-            AUTO,
-            ATMOS_PASS_THROUGH,
-            DIGITAL_PASS_THROUGH,
-            DIGITAL_PCM
-        };
+        struct IOutput : virtual public Core::IUnknown {
 
-        virtual void Output(IDolby::Output type) = 0;
-        virtual IDolby::Output Output() = 0;
+            enum { ID = ID_DOLBY_OUTPUT };
+
+            virtual ~IOutput(){};
+
+            enum Type : uint8_t {
+                AUTO,
+                ATMOS_PASS_THROUGH,
+                DIGITAL_PASS_THROUGH,
+                DIGITAL_PCM
+            };
+
+            virtual void Set(IDolby::IOutput::Type) = 0;
+
+            virtual IDolby::IOutput::Type Get() = 0;
+        };
     };
 }
 }
