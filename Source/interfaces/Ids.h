@@ -171,7 +171,6 @@ namespace Exchange {
         ID_BLUETOOTH_CLASSIC_SECURITYCALLBACK,
         ID_BLUETOOTH_LOWENERGY,
 
-        ID_DOLBY,
         ID_DOLBY_OUTPUT
     };
 }

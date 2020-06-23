@@ -24,16 +24,13 @@
 namespace WPEFramework {
 namespace Exchange {
 
-    struct IDolby : virtual public Core::IUnknown {
-        enum { ID = ID_DOLBY };
-
-        virtual ~IDolby(){};
+    namespace Dolby {
 
         struct IOutput : virtual public Core::IUnknown {
 
             enum { ID = ID_DOLBY_OUTPUT };
 
-            virtual ~IOutput(){};
+            ~IOutput() = default override;
 
             enum Type : uint8_t {
                 AUTO,
@@ -42,10 +39,10 @@ namespace Exchange {
                 DIGITAL_PCM
             };
 
-            virtual void Set(IDolby::IOutput::Type) = 0;
-
-            virtual IDolby::IOutput::Type Get() = 0;
+            virtual void Mode(const IDolby::IOutput::Type value) = 0;
+            
+            virtual IDolby::IOutput::Type Mode() const = 0;
         };
-    };
+    }
 }
 }
