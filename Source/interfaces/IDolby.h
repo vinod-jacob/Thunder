@@ -30,18 +30,18 @@ namespace Exchange {
 
             enum { ID = ID_DOLBY_OUTPUT };
 
-            ~IOutput() = default override;
+            ~IOutput() override = default;
 
             enum Type : uint8_t {
-                AUTO,
-                ATMOS_PASS_THROUGH,
-                DIGITAL_PASS_THROUGH,
-                DIGITAL_PCM
+                DIGITAL_PCM = 0,
+                DIGITAL_PASS_THROUGH = 3,
+                ATMOS_PASS_THROUGH = 4,
+                AUTO = 5
             };
 
-            virtual void Mode(const IDolby::IOutput::Type value) = 0;
+            virtual void Mode(const Dolby::IOutput::Type value) = 0;
             
-            virtual IDolby::IOutput::Type Mode() const = 0;
+            virtual Dolby::IOutput::Type Mode() const = 0;
         };
     }
 }
