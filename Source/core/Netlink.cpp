@@ -73,31 +73,35 @@ namespace Core {
 
     uint16_t Netlink::Deserialize(const uint8_t stream[], const uint16_t streamLength)
     {
-        const nlmsghdr* header = reinterpret_cast<const nlmsghdr*>(stream);
-        uint16_t dataLeft = streamLength;
+        uint16_t bytesRead = 0;
+        Frames frame(stream, streamLength);
         
-        while (NLMSG_OK(header, dataLeft)) {
-            if (header->nlmsg_type != NLMSG_NOOP) {
-                if (header->nlmsg_type == NLMSG_DONE) {
-                    _isMultimessage = false;
-                } else {                    
-                    _type = header->nlmsg_type;
-                    _flags = header->nlmsg_flags;
-                    _mySequence = header->nlmsg_seq;
+        if (frame.Next() == true) {
 
-                    _isMultimessage = header->nlmsg_flags & NLM_F_MULTI;
-                }
-                    
-                Read(
-                    reinterpret_cast<const uint8_t *>(NLMSG_DATA(header)), 
-                    header->nlmsg_len - sizeof(header)
-                    );
-            }
+            _type = frame.Type();
+            _flags = frame.Flags();
+            ASSERT(_mySequence == frame.Sequence());
 
-            header = NLMSG_NEXT(header, dataLeft);
+            // TODO: move to frame code
+            _isMultimessage = _flags & NLM_F_MULTI;
+
+            bytesRead += Read(
+                frame.Payload<uint8_t>(), 
+                frame.PayloadSize()
+            );
+
+            if (bytesRead != 0) {
+                // Reading part of the message would be unexpected
+                ASSERT(bytesRead == frame.PayloadSize());
+
+                bytesRead += frame.HeaderSize();
+                
+                // Header + payload should equal frame size
+                ASSERT(bytesRead == frame.RawSize());
+            } 
         }
 
-        return _isMultimessage ? 0 : streamLength - dataLeft;
+        return bytesRead;
     }
 
     uint32_t SocketNetlink::Send(const Core::Netlink& outbound, const uint32_t waitTime)
@@ -106,32 +110,21 @@ namespace Core {
 
         _adminLock.Lock();
 
-        _pending.emplace_back(outbound);
+        _pending.emplace_back(
+            new MessageSync(outbound)
+        );
 
-        Message& myEntry = _pending.back();
+        auto myEntry = _pending.back();
 
         _adminLock.Unlock();
 
         Core::SocketDatagram::Trigger();
 
-        if (myEntry.Wait(waitTime) == false) {
+        if (myEntry->Wait(waitTime) == false) {
             result = Core::ERROR_RPC_CALL_FAILED;
         } else {
             result = Core::ERROR_NONE;
         }
-
-        // if we leave we need to take out "our" element.
-        _adminLock.Lock();
-
-        PendingList::iterator index(std::find(_pending.begin(), _pending.end(), outbound));
-
-        ASSERT(index != _pending.end());
-
-        if (index != _pending.end()) {
-            _pending.erase(index);
-        }
-
-        _adminLock.Unlock();
 
         return (result);
     }
@@ -142,32 +135,21 @@ namespace Core {
 
         _adminLock.Lock();
 
-        _pending.emplace_back(outbound, inbound);
+        _pending.emplace_back(
+            new MessageSync(outbound, inbound)
+        );
 
-        Message& myEntry = _pending.back();
+        auto& myEntry = _pending.back();
 
         _adminLock.Unlock();
 
         Core::SocketDatagram::Trigger();
 
-        if (myEntry.Wait(waitTime) == false) {
+        if (myEntry->Wait(waitTime) == false) {
             result = Core::ERROR_RPC_CALL_FAILED;
         } else {
             result = Core::ERROR_NONE;
         }
-
-        // if we leave we need to take out "our" element.
-        _adminLock.Lock();
-
-        PendingList::iterator index(std::find(_pending.begin(), _pending.end(), outbound));
-
-        ASSERT(index != _pending.end());
-
-        if (index != _pending.end()) {
-            _pending.erase(index);
-        }
-
-        _adminLock.Unlock();
 
         return (result);
     }
@@ -176,20 +158,24 @@ namespace Core {
     /* virtual */ uint16_t SocketNetlink::SendData(uint8_t* dataFrame, const uint16_t maxSendSize)
     {
         uint16_t result = 0;
-
+        
         if (_pending.size() > 0) {
 
             _adminLock.Lock();
 
+            // Skip all already send items
             PendingList::iterator index(_pending.begin());
-
-            // Skip all, already send items
-            while ((index != _pending.end()) && (index->IsSend() == true)) {
+            while ((index != _pending.end()) && ((*index)->IsSend() == true)) {
                 index++;
             }
 
             if (index != _pending.end()) {
-                result = index->Serialize(dataFrame, maxSendSize);
+                result = (*index)->Serialize(dataFrame, maxSendSize);
+
+                // If it's one way message, we are done with it :)
+                if ((*index)->NeedResponse() == false) {
+                    _pending.erase(index);
+                }
             }
 
             _adminLock.Unlock();
@@ -206,35 +192,46 @@ namespace Core {
     /* virtual */ uint16_t SocketNetlink::ReceiveData(uint8_t* dataFrame, const uint16_t receivedSize)
     {
 
-        uint16_t result = receivedSize;
-        Netlink::Frames frames(dataFrame, receivedSize);
-
 #ifdef DEBUG_FRAMES
         DumpFrame("RECEIVED", dataFrame, result);
 #endif
 
-        _adminLock.Lock();
-
+        Netlink::Frames frames(dataFrame, receivedSize);
         while (frames.Next() == true) {
-
-            PendingList::iterator index(_pending.begin());
+            _adminLock.Lock();
 
             // Check if this is a response to something pending..
-            while ((index != _pending.end()) && (index->Sequence() != frames.Sequence())) {
+            PendingList::iterator index(_pending.begin());
+            while ((index != _pending.end()) && ((*index)->Sequence() != frames.Sequence())) {
                 index++;
             }
 
+            uint32_t read = 0;
             if (index != _pending.end()) {
+                // We found request waiting for this response!
+                _adminLock.Unlock();
+                read = (*index)->Deserialize(frames.RawData(), frames.RawSize());
+                _adminLock.Lock();
 
-                index->Deserialize(frames);
+                if ((*index)->IsProcessed()) {
+                    _pending.erase(index);
+                }
+                _adminLock.Unlock();
             } else {
-                Deserialize(frames.RawData(), frames.RawSize());
+                // This message was sent without a request from our side!
+                _adminLock.Unlock();
+                read = this->Deserialize(frames.RawData(), frames.RawSize());
             }
-        }
 
-        _adminLock.Unlock();
+            if (read == 0) {
+                TRACE_L1("Failed at parsing Netlink message of type %d. Droping this frame...", frames.Type()); 
+            } else {
+                // We should always either read whole frame or return 0. This should never happen...
+                ASSERT(read == frames.RawSize());
+            }
+        } 
 
-        return (result);
+        return receivedSize;
     }
 
     // Signal a state change, Opened, Closed or Accepted

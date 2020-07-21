@@ -25,6 +25,9 @@ add_library(CompileSettingsDebug::CompileSettingsDebug ALIAS CompileSettingsDebu
 
 include(CMakePackageConfigHelpers)
 
+target_compile_options(CompileSettingsDebug INTERFACE -g -O0)
+
+
 #
 # Build type specific options
 #

@@ -27,6 +27,8 @@
 #include "Portability.h"
 #include "SocketPort.h"
 #include "Sync.h"
+#include <functional>
+#include <memory>
 
 #include <linux/connector.h>
 #include <linux/rtnetlink.h>
@@ -95,7 +97,8 @@ namespace Core {
             Frames(const uint8_t dataFrame[], const uint16_t receivedSize)
                 : _data(dataFrame)
                 , _size(receivedSize)
-                , _offset(~0)
+                , _header(nullptr)
+                , _dataLeft(~0)
             {
             }
             ~Frames()
@@ -105,62 +108,74 @@ namespace Core {
         public:
             inline bool IsValid() const
             {
-                return (_offset < _size);
+                return (_header != nullptr) && (NLMSG_OK(_header, _dataLeft));
             }
             inline bool Next()
             {
-
-                if (_offset == static_cast<uint16_t>(~0)) {
-                    _offset = 0;
-                } else if (_offset < _size) {
-                    _offset += NLMSG_ALIGN(Message()->nlmsg_len);
-                }
-
-                if ((_offset < _size) && (NLMSG_OK(Message(), _size - _offset) == false)) {
-                    _offset = _size;
+                if (_header == nullptr) {
+                    _header = reinterpret_cast<nlmsghdr*>(const_cast<uint8_t*>(_data));
+                    _dataLeft = _size;
+                } else {
+                    _header = NLMSG_NEXT(_header, _dataLeft);
                 }
 
                 return (IsValid());
             }
             inline uint32_t Type() const
             {
-                return (Message()->nlmsg_type);
+                ASSERT(IsValid());
+                return (_header->nlmsg_type);
             }
             inline uint32_t Sequence() const
             {
-                return (Message()->nlmsg_seq);
+                ASSERT(IsValid());
+                return (_header->nlmsg_seq);
             }
             inline uint32_t Flags() const
             {
-                return (Message()->nlmsg_flags);
+                ASSERT(IsValid());
+                return (_header->nlmsg_flags);
             }
-            inline const uint8_t* Data() const
+            template <typename T>
+            inline const T* Payload() const
             {
-                return (reinterpret_cast<const uint8_t*>(NLMSG_DATA(Message())));
+                ASSERT(IsValid());
+                return (reinterpret_cast<const T*>(NLMSG_DATA(_header)));
             }
-            inline uint16_t Size() const
+            // Return just the packet content size (without netlink header)
+            inline uint16_t PayloadSize() const
             {
-                return (Message()->nlmsg_len - NLMSG_HDRLEN);
+                ASSERT(IsValid());
+                return NLMSG_PAYLOAD(_header, 0);
             }
             inline const uint8_t* RawData() const
             {
-                return (&(_data[_offset]));
+                ASSERT(IsValid());
+                return reinterpret_cast<const uint8_t*>(_header);
             }
+            // Returns whole packet size (including header)
             inline uint16_t RawSize() const
             {
-                return (Message()->nlmsg_len);
+                ASSERT(IsValid());
+                return _header->nlmsg_len;
+            }
+
+            static constexpr uint16_t HeaderSize() {
+                return NLMSG_HDRLEN;
             }
 
         private:
-            inline const struct nlmsghdr* Message() const
+            inline const struct nlmsghdr* Header() const
             {
-                return (reinterpret_cast<const struct nlmsghdr*>(&(_data[_offset])));
+                ASSERT(IsValid());
+                return _header;
             }
 
         private:
             const uint8_t* _data;
             uint16_t _size;
-            uint16_t _offset;
+            nlmsghdr* _header;
+            uint16_t _dataLeft;
         };
 
     public:
@@ -207,7 +222,11 @@ namespace Core {
         {
             _flags = value;
         }
+        
+        // Write a netlink message to the stream. Returns message size where 0 means fail
         virtual uint16_t Write(uint8_t stream[], const uint16_t length) const = 0;
+
+        // Read incoming message response from the stream. Returning 0 means fail
         virtual uint16_t Read(const uint8_t stream[], const uint16_t length) = 0;
 
     private:
@@ -219,7 +238,6 @@ namespace Core {
     };
 
     // https://www.kernel.org/doc/Documentation/connector/connector.txt
-
     template <const uint32_t IDX, const uint32_t VAL>
     class ConnectorType : public Core::Netlink {
     private:
@@ -310,30 +328,21 @@ namespace Core {
         SocketNetlink(const SocketNetlink&) = delete;
         SocketNetlink& operator=(const SocketNetlink&) = delete;
 
+    protected:
         class Message {
-        private:
-            Message() = delete;
-            Message(const Message&) = delete;
-            Message& operator=(const Message&) = delete;
-
+        public:
             enum state {
                 LOADED,
                 SEND,
-                FAILURE
+                FAILURE,
+                PROCESSED
             };
 
-        public:
-            Message(const Netlink& outbound)
-                : _outbound(outbound)
-                , _inbound(nullptr)
-                , _signaled(false, true)
-                , _state(LOADED)
-            {
-            }
-            Message(const Netlink& outbound, Netlink& inbound)
-                : _outbound(outbound)
-                , _inbound(&inbound)
-                , _signaled(false, true)
+            Message(const Message&) = delete;
+            Message& operator=(const Message&) = delete;
+
+            Message()
+                : _signaled(false, true)
                 , _state(LOADED)
             {
             }
@@ -346,35 +355,63 @@ namespace Core {
             {
                 return (_state != LOADED);
             }
+            inline bool IsProcessed() const
+            {
+                return (_state == PROCESSED || _state == FAILURE);
+            }
+            inline bool NeedResponse() const 
+            {
+                return Inbound() != nullptr;
+            }
             inline uint32_t Sequence() const
             {
-                return (_outbound.Sequence());
+                return (Outbound().Sequence());
             }
-            inline void Deserialize(const Netlink::Frames& frame)
+            virtual inline uint16_t Deserialize(const uint8_t buffer[], const uint16_t length)
             {
+                uint16_t bytesRead = 0;
 
-                ASSERT(frame.IsValid() == true);
+                Netlink::Frames frame(buffer, length);
+                if (frame.Next() == true) {
+                    // Check if its a partial message
+                    bool isMultimessage ;
+                    if (frame.Type() == NLMSG_DONE) {
+                        isMultimessage = false;
+                    } else {
+                        isMultimessage = frame.Flags() & NLM_F_MULTI;
+                    } 
 
-                if (frame.Type() == NLMSG_ERROR) {
-                    // It means we received an error.
-                    _state = FAILURE;
-                    _signaled.SetEvent();
-                } else if ((_inbound != nullptr) && (_inbound->Deserialize(frame.RawData(), frame.RawSize()) != 0)) {
-                    _signaled.SetEvent();
+                    bytesRead = Inbound()->Deserialize(
+                        frame.RawData(),
+                        frame.RawSize()
+                    );
+
+                    // We are done only if all response messages arrived.
+                    // If message is still in multimessage state, we should
+                    // wait for more data to signal a success
+                    if ((isMultimessage == false) || (frame.Type() == NLMSG_ERROR)) {
+                        _state = (frame.Type() == NLMSG_ERROR) ? FAILURE : PROCESSED;
+                        _signaled.SetEvent();
+                    }
                 }
+
+                return bytesRead;
             }
+
             inline uint16_t Serialize(uint8_t buffer[], const uint16_t length) const
             {
                 _state = SEND;
-                uint16_t handled = _outbound.Serialize(buffer, length);
-                if (_inbound == nullptr) {
+                uint16_t handled = Outbound().Serialize(buffer, length);
+                if (NeedResponse() == false) {
                     _signaled.SetEvent();
                 }
                 return (handled);
             }
             inline bool operator==(const Core::Netlink& rhs) const
             {
-                return (&rhs == &_outbound);
+                const Netlink& outbound = Outbound();
+
+                return (&rhs == &outbound);
             }
             inline bool operator!=(const Core::Netlink& rhs) const
             {
@@ -386,17 +423,102 @@ namespace Core {
                 return (result);
             }
 
-        private:
-            const Netlink& _outbound;
-            Netlink* _inbound;
+        protected:
+            virtual const Netlink& Outbound() const = 0;
+            virtual Netlink* Inbound() const = 0;
+
             mutable Core::Event _signaled;
             mutable state _state;
         };
-        typedef std::list<Message> PendingList;
+
+        class MessageSync : public Message {
+        public:
+            MessageSync() = delete;
+            MessageSync(const MessageSync&) = delete;
+            MessageSync& operator=(const MessageSync&) = delete;
+
+            MessageSync(const Netlink& outbound)
+                : Message()
+                , _outbound(outbound)
+                , _inbound(nullptr)
+            {
+            }
+            MessageSync(const Netlink& outbound, Netlink& inbound)
+                : Message()
+                , _outbound(outbound)
+                , _inbound(&inbound)
+            {
+            }
+            ~MessageSync()
+            {
+            }
+        protected:
+            const Netlink& Outbound() const override 
+            {
+                return _outbound;
+            }
+            Netlink* Inbound() const override 
+            {
+                return _inbound;
+            }
+        private:
+            const Netlink& _outbound;
+            Netlink* _inbound;
+        };
+
+        template <typename NetlinkType>
+        class MessageAsync : public Message {
+        public:
+            MessageAsync() = delete;
+            MessageAsync(const MessageAsync&) = delete;
+            MessageAsync& operator=(const MessageAsync&) = delete;
+
+            template <typename ... ConstructorArgs>
+            MessageAsync(std::function<void(bool)>& callback, ConstructorArgs... netlinkParams)
+                : Message()
+                , _callback(callback)
+                , _netlink(netlinkParams...)
+            {
+            }
+
+            ~MessageAsync()
+            {
+            }
+
+            inline uint16_t Deserialize(const uint8_t buffer[], const uint16_t length) override
+            {
+                uint16_t result = Message::Deserialize(buffer, length);
+
+                if (IsProcessed()) {
+                    _callback(_state != Message::state::FAILURE);
+                }
+
+                return result;
+            }
+
+        protected:
+            const Netlink& Outbound() const override 
+            {
+                return _netlink;
+            }
+            Netlink* Inbound() const override 
+            {
+                return const_cast<Netlink*>(static_cast<const Netlink*>(&_netlink));
+            }
+        private:
+            std::function<void(bool)> _callback;
+            NetlinkType _netlink;
+        };
+
+
+        typedef std::list<std::shared_ptr<Message>> PendingList;
 
     public:
+        // Usually netlink packets are limited to PAGE_SIZE length.
+        // It's most often the case that single netlink package in genreal should not be larger than 8k, even if page is larger
+        // https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/include/linux/netlink.h?h=linux-4.9.y#n112
         SocketNetlink(const Core::NodeId& destination)
-            : SocketDatagram(false, destination, Core::NodeId(), 512, 1024)
+            : SocketDatagram(false, destination, Core::NodeId(), 4096, 8192)
             , _adminLock()
         {
         }
@@ -406,10 +528,34 @@ namespace Core {
         }
 
     public:
+        // Send a one-way message via netlink protocol. Message should not cause any reponse from the other side.
+        // Use with caution, as any response will be treated as unexpected (ie. don't use it if you just don't 
+        // care about response)
         uint32_t Send(const Core::Netlink& outbound, const uint32_t waitTime);
+
+        // Exchange a message-response transaction synchronously. 
         uint32_t Exchange(const Core::Netlink& outbound, Core::Netlink& inbound, const uint32_t waitTime);
 
-        virtual uint16_t Deserialize(const uint8_t dataFrame[], const uint16_t receivedSize) = 0;
+        // Exchange message-response transaction in an asynchronous manner. 
+        template<typename NetlinkType, class ... NetlinkParams>
+        uint32_t ExchangeAsync(std::function<void(bool)> callback, NetlinkParams... netlinkParams)
+        {
+            _adminLock.Lock();
+            _pending.emplace_back(
+                new MessageAsync<NetlinkType>(callback, netlinkParams...)
+            );
+            _adminLock.Unlock();
+
+            Trigger();
+
+            return Core::ERROR_NONE;
+        }
+
+        virtual uint16_t Deserialize(const uint8_t dataFrame[], const uint16_t receivedSize) 
+        {
+            TRACE_L1("Got unexpected incoming netlink message");
+            return receivedSize;
+        }
 
     private:
         // Methods to extract and insert data into the socket buffers
