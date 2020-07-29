@@ -572,19 +572,6 @@ namespace Core {
             return Core::ERROR_NONE;
         }
 
-        // Adds request to exchange queue. Expected to be called in a response to the message
-        template<typename NetlinkType, class ... NetlinkParams>
-        uint32_t RequestExchange(const NetlinkParams... netlinkParams)
-        {
-            _adminLock.Lock();
-            _exchangeQueue.emplace_back(
-                new MessageComp<NetlinkType>(netlinkParams...)
-            );
-            _adminLock.Unlock();
-
-            return Core::ERROR_NONE;
-        }
-
         virtual uint16_t Deserialize(const uint8_t dataFrame[], const uint16_t receivedSize) 
         {
             TRACE_L1("Unhandled netlink message originating from outside!");
@@ -596,28 +583,6 @@ namespace Core {
         uint16_t ExecuteExchangeQueue(const uint32_t waitTime) 
         {   
             uint16_t result = Core::ERROR_NONE;
-
-            _adminLock.Lock();
-            while (_exchangeQueue.size() > 0) {
-                _pending.push_back(_exchangeQueue.front());
-                _exchangeQueue.pop_front();
-
-                auto& myEntry = _pending.back();
-
-                _adminLock.Unlock();
-
-                Core::SocketDatagram::Trigger();
-
-                if (myEntry->Wait(waitTime) == false) {
-                    result = Core::ERROR_RPC_CALL_FAILED;
-
-                    _adminLock.Lock();
-                    _exchangeQueue.clear();
-                    _adminLock.Unlock();
-                } else {
-                    result = Core::ERROR_NONE;
-                }
-            }
 
             return result;
         }

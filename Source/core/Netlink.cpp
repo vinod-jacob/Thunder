@@ -131,13 +131,26 @@ namespace Core {
 
     uint32_t SocketNetlink::Exchange(const Core::Netlink& outbound, Core::Netlink& inbound, const uint32_t waitTime)
     {
+        uint32_t result = Core::ERROR_ILLEGAL_STATE;
+
         _adminLock.Lock();
-        _exchangeQueue.emplace_back(
+        _pending.emplace_back(
             new MessageRef(outbound, inbound)
         );
+
+        auto& myEntry = _pending.back();
+
         _adminLock.Unlock();
 
-        return ExecuteExchangeQueue(waitTime);
+        Core::SocketDatagram::Trigger();
+
+        if (myEntry->Wait(waitTime) == false) {
+            result = Core::ERROR_RPC_CALL_FAILED;
+        } else {
+            result = Core::ERROR_NONE;
+        }
+    
+        return result;
     }
 
     // Methods to extract and insert data into the socket buffers

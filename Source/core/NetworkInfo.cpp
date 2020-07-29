@@ -1208,7 +1208,6 @@ namespace Core {
         inline void Reload()
         {
             if (IsValid() == true) {
-                _adminLock.Lock();
                 _networks.clear();
 
                 InterfacesFetchType ifInfo(_networks);
@@ -1235,7 +1234,6 @@ namespace Core {
                 }
             }
 
-            _adminLock.Unlock();
         }
 
         inline void ReloadAsync(std::function<void()>& callback)
@@ -1243,7 +1241,6 @@ namespace Core {
 
             if (IsValid() == true) {
 
-                _adminLock.Lock();
                 _networks.clear();
 
                 _channel->ExchangeAsync<InterfacesFetchType>([this, callback](bool success) {
@@ -1263,7 +1260,6 @@ namespace Core {
                                             index++;
                                         }
 
-                                        _adminLock.Unlock();
                                         callback();
                                     }
                                 }, std::ref(_networks));
@@ -1287,7 +1283,6 @@ namespace Core {
         ProxyType<SocketIPNetworks> _channel;
         std::map<uint32_t, Network> _networks;
         Network _invalidNetwork;
-        Core::CriticalSection _adminLock;
     };
     
     // TODO: Redesign in asynchronous way
@@ -1327,6 +1322,7 @@ namespace Core {
             if (frame.Type() == RTM_NEWLINK) {
 
                 const IPNetworks::Network& network(networkController[ifi->ifi_index]);
+                // REPRODUCE: METROL-113 - Force this path with if (network.IsValid() == false || true). It changes timing just enaugh to reproduce problem
                 if (network.IsValid() == false) {
                     interfaceName = network.Name();
                     int ifiIndex = ifi->ifi_index;
