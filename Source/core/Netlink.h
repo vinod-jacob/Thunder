@@ -401,7 +401,9 @@ namespace Core {
             inline uint16_t Serialize(uint8_t buffer[], const uint16_t length) const
             {
                 _state = SEND;
+
                 uint16_t handled = Outbound().Serialize(buffer, length);
+
                 if (NeedResponse() == false) {
                     _signaled.SetEvent();
                 }
@@ -431,25 +433,55 @@ namespace Core {
             mutable state _state;
         };
 
-        class MessageSync : public Message {
+        template <typename NetlinkType>
+        class MessageComp : public Message {
         public:
-            MessageSync() = delete;
-            MessageSync(const MessageSync&) = delete;
-            MessageSync& operator=(const MessageSync&) = delete;
+            MessageComp() = delete;
+            MessageComp(const MessageComp&) = delete;
+            MessageComp& operator=(const MessageComp&) = delete;
 
-            MessageSync(const Netlink& outbound)
+            template <typename ... ConstructorArgs>
+            MessageComp(ConstructorArgs... netlinkParams)
+                : Message()
+                , _netlink(netlinkParams...)
+            {
+            }
+
+            ~MessageComp()
+            {
+            }
+        protected:
+            const Netlink& Outbound() const override 
+            {
+                return _netlink;
+            }
+            Netlink* Inbound() const override 
+            {
+                return const_cast<Netlink*>(static_cast<const Netlink*>(&_netlink));
+            }
+        private:
+            NetlinkType _netlink;
+        };
+
+        class MessageRef : public Message {
+        public:
+            MessageRef() = delete;
+            MessageRef(const MessageRef&) = delete;
+            MessageRef& operator=(const MessageRef&) = delete;
+
+            MessageRef(const Netlink& outbound)
                 : Message()
                 , _outbound(outbound)
                 , _inbound(nullptr)
             {
             }
-            MessageSync(const Netlink& outbound, Netlink& inbound)
+            MessageRef(const Netlink& outbound, Netlink& inbound)
                 : Message()
                 , _outbound(outbound)
                 , _inbound(&inbound)
             {
             }
-            ~MessageSync()
+            ~MessageRef()
             {
             }
         protected:
@@ -467,7 +499,7 @@ namespace Core {
         };
 
         template <typename NetlinkType>
-        class MessageAsync : public Message {
+        class MessageAsync : public MessageComp<NetlinkType> {
         public:
             MessageAsync() = delete;
             MessageAsync(const MessageAsync&) = delete;
@@ -475,9 +507,8 @@ namespace Core {
 
             template <typename ... ConstructorArgs>
             MessageAsync(std::function<void(bool)>& callback, ConstructorArgs... netlinkParams)
-                : Message()
+                : MessageComp<NetlinkType>(netlinkParams...)
                 , _callback(callback)
-                , _netlink(netlinkParams...)
             {
             }
 
@@ -489,25 +520,15 @@ namespace Core {
             {
                 uint16_t result = Message::Deserialize(buffer, length);
 
-                if (IsProcessed()) {
-                    _callback(_state != Message::state::FAILURE);
+                if (MessageComp<NetlinkType>::IsProcessed()) {
+                    _callback(Message::_state != Message::state::FAILURE);
                 }
 
                 return result;
             }
 
-        protected:
-            const Netlink& Outbound() const override 
-            {
-                return _netlink;
-            }
-            Netlink* Inbound() const override 
-            {
-                return const_cast<Netlink*>(static_cast<const Netlink*>(&_netlink));
-            }
         private:
             std::function<void(bool)> _callback;
-            NetlinkType _netlink;
         };
 
 
@@ -533,10 +554,10 @@ namespace Core {
         // care about response)
         uint32_t Send(const Core::Netlink& outbound, const uint32_t waitTime);
 
-        // Exchange a message-response transaction synchronously. 
+        // Exchange a message-response transaction synchronously. Must not be called from resource-monitor thread!
         uint32_t Exchange(const Core::Netlink& outbound, Core::Netlink& inbound, const uint32_t waitTime);
 
-        // Exchange message-response transaction in an asynchronous manner. 
+        // Exchange message-response transaction in an asynchronous manner. Can be called from ResourceMonitor thread
         template<typename NetlinkType, class ... NetlinkParams>
         uint32_t ExchangeAsync(std::function<void(bool)> callback, NetlinkParams... netlinkParams)
         {
@@ -551,13 +572,56 @@ namespace Core {
             return Core::ERROR_NONE;
         }
 
+        // Adds request to exchange queue. Expected to be called in a response to the message
+        template<typename NetlinkType, class ... NetlinkParams>
+        uint32_t RequestExchange(const NetlinkParams... netlinkParams)
+        {
+            _adminLock.Lock();
+            _exchangeQueue.emplace_back(
+                new MessageComp<NetlinkType>(netlinkParams...)
+            );
+            _adminLock.Unlock();
+
+            return Core::ERROR_NONE;
+        }
+
         virtual uint16_t Deserialize(const uint8_t dataFrame[], const uint16_t receivedSize) 
         {
-            TRACE_L1("Got unexpected incoming netlink message");
+            TRACE_L1("Unhandled netlink message originating from outside!");
+
             return receivedSize;
         }
 
     private:
+        uint16_t ExecuteExchangeQueue(const uint32_t waitTime) 
+        {   
+            uint16_t result = Core::ERROR_NONE;
+
+            _adminLock.Lock();
+            while (_exchangeQueue.size() > 0) {
+                _pending.push_back(_exchangeQueue.front());
+                _exchangeQueue.pop_front();
+
+                auto& myEntry = _pending.back();
+
+                _adminLock.Unlock();
+
+                Core::SocketDatagram::Trigger();
+
+                if (myEntry->Wait(waitTime) == false) {
+                    result = Core::ERROR_RPC_CALL_FAILED;
+
+                    _adminLock.Lock();
+                    _exchangeQueue.clear();
+                    _adminLock.Unlock();
+                } else {
+                    result = Core::ERROR_NONE;
+                }
+            }
+
+            return result;
+        }
+    
         // Methods to extract and insert data into the socket buffers
         virtual uint16_t SendData(uint8_t* dataFrame, const uint16_t maxSendSize) override;
         virtual uint16_t ReceiveData(uint8_t* dataFrame, const uint16_t receivedSize) override;
@@ -568,6 +632,7 @@ namespace Core {
         Core::CriticalSection _adminLock;
         uint32_t _bufferAfter;
         PendingList _pending;
+        PendingList _exchangeQueue;
     };
 } // namespace Core
 } // namespace WPEFramework

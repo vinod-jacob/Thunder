@@ -48,6 +48,7 @@
 #include <net/if_dl.h>
 #endif
 
+
 // Convert a string of binary bytes data (address) to a Hexadecimal string (output)
 void ConvertMACToString(const uint8_t address[], const uint8_t length, const char delimiter, string& output)
 {
@@ -69,6 +70,12 @@ void ConvertMACToString(const uint8_t address[], const uint8_t length, const cha
 namespace WPEFramework {
 
 namespace Core {
+
+#ifdef __DEBUG__
+            static constexpr uint32_t requestWaitTime = Core::infinite;
+#else
+            static constexpr uint32_t requestWaitTime = 2000;
+#endif
 
 #ifdef __WINDOWS__
 
@@ -1143,12 +1150,6 @@ namespace Core {
                 _channel = channel;
             }
 
-#ifdef __DEBUG__
-            static constexpr uint32_t requestWaitTime = Core::infinite;
-#else
-            static constexpr uint32_t requestWaitTime = 2000;
-#endif
-
         private:
             uint8_t _MAC[6];
             uint32_t _index;
@@ -1207,20 +1208,20 @@ namespace Core {
         inline void Reload()
         {
             if (IsValid() == true) {
-
+                _adminLock.Lock();
                 _networks.clear();
 
                 InterfacesFetchType ifInfo(_networks);
 
-                if (_channel->Exchange(ifInfo, ifInfo, 4000) == ERROR_NONE) {
+                if (_channel->Exchange(ifInfo, ifInfo, requestWaitTime) == ERROR_NONE) {
 
                     IPAddressFetchType<false> ipv4(_networks);
 
-                    if (_channel->Exchange(ipv4, ipv4, 4000) == ERROR_NONE) {
+                    if (_channel->Exchange(ipv4, ipv4, requestWaitTime) == ERROR_NONE) {
 
                         IPAddressFetchType<true> ipv6(_networks);
 
-                        if (_channel->Exchange(ipv6, ipv6, 4000) == ERROR_NONE) {
+                        if (_channel->Exchange(ipv6, ipv6, requestWaitTime) == ERROR_NONE) {
 
                             // Fill in the channel for all networks.
                             std::map<uint32_t, Network>::iterator index(_networks.begin());
@@ -1233,12 +1234,16 @@ namespace Core {
                     }
                 }
             }
+
+            _adminLock.Unlock();
         }
 
         inline void ReloadAsync(std::function<void()>& callback)
         {
+
             if (IsValid() == true) {
 
+                _adminLock.Lock();
                 _networks.clear();
 
                 _channel->ExchangeAsync<InterfacesFetchType>([this, callback](bool success) {
@@ -1258,6 +1263,7 @@ namespace Core {
                                             index++;
                                         }
 
+                                        _adminLock.Unlock();
                                         callback();
                                     }
                                 }, std::ref(_networks));
@@ -1281,6 +1287,7 @@ namespace Core {
         ProxyType<SocketIPNetworks> _channel;
         std::map<uint32_t, Network> _networks;
         Network _invalidNetwork;
+        Core::CriticalSection _adminLock;
     };
     
     // TODO: Redesign in asynchronous way
@@ -1313,6 +1320,7 @@ namespace Core {
         Netlink::Frames frame(dataFrame, receivedSize);
 
         if (frame.Next() == true) {
+
             const struct ifinfomsg* ifi = frame.Payload<ifinfomsg>();
             string interfaceName;
 
@@ -1323,17 +1331,18 @@ namespace Core {
                     interfaceName = network.Name();
                     int ifiIndex = ifi->ifi_index;
 
+                    // TODO: Remove code duplication
                     AdapterIterator::FlushAsync([this, interfaceName, ifiIndex]() {
                         const IPNetworks::Network& network(networkController[ifiIndex]);
-                        if (network.IsValid() == true) {
-                            if (interfaceName.empty() == false) {
-                                Notify(interfaceName);
-                            }
+                        
+                        if (network.IsValid() == true && interfaceName.empty() == false) {
+                            Notify(interfaceName);
                         }
                     });
                     
                 } else {
                     interfaceName = network.Name();
+                    Notify(interfaceName);
                 }
 
             } else if (frame.Type() == RTM_DELLINK) {
@@ -1342,8 +1351,13 @@ namespace Core {
                 if (network.IsValid() == true) {
 
                     interfaceName = network.Name();
-                    AdapterIterator::FlushAsync([this, interfaceName]() {
-                        if (interfaceName.empty() == false) {
+                    int ifiIndex = ifi->ifi_index;
+
+                    // TODO: Remove code duplication
+                    AdapterIterator::FlushAsync([this, interfaceName, ifiIndex]() {
+                        const IPNetworks::Network& network(networkController[ifiIndex]);
+
+                        if (network.IsValid() == true && interfaceName.empty() == false) {
                             Notify(interfaceName);
                         }
                     });

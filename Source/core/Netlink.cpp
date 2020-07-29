@@ -111,7 +111,7 @@ namespace Core {
         _adminLock.Lock();
 
         _pending.emplace_back(
-            new MessageSync(outbound)
+            new MessageRef(outbound)
         );
 
         auto myEntry = _pending.back();
@@ -131,27 +131,13 @@ namespace Core {
 
     uint32_t SocketNetlink::Exchange(const Core::Netlink& outbound, Core::Netlink& inbound, const uint32_t waitTime)
     {
-        uint32_t result = Core::ERROR_BAD_REQUEST;
-
         _adminLock.Lock();
-
-        _pending.emplace_back(
-            new MessageSync(outbound, inbound)
+        _exchangeQueue.emplace_back(
+            new MessageRef(outbound, inbound)
         );
-
-        auto& myEntry = _pending.back();
-
         _adminLock.Unlock();
 
-        Core::SocketDatagram::Trigger();
-
-        if (myEntry->Wait(waitTime) == false) {
-            result = Core::ERROR_RPC_CALL_FAILED;
-        } else {
-            result = Core::ERROR_NONE;
-        }
-
-        return (result);
+        return ExecuteExchangeQueue(waitTime);
     }
 
     // Methods to extract and insert data into the socket buffers
