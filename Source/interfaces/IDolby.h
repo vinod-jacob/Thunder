@@ -40,8 +40,9 @@ namespace Exchange {
             };
 
             virtual void Mode(const Dolby::IOutput::Type value) = 0;
-            
             virtual Dolby::IOutput::Type Mode() const = 0;
+            virtual bool AtmosLock(uint32_t& error /* @out */) const = 0;
+            virtual uint32_t AtmosLock(bool lock) = 0;
         };
     }
 }
