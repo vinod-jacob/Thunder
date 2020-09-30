@@ -25,21 +25,22 @@ file(GLOB JSON_FILE "${CMAKE_CURRENT_SOURCE_DIR}/json/*.json")
 list(APPEND PUBLIC_HEADERS Module.h)
 list(APPEND PUBLIC_HEADERS definitions.h)
 
-ProxyStubGenerator(INPUT "${CMAKE_CURRENT_SOURCE_DIR}" OUTDIR "${CMAKE_CURRENT_BINARY_DIR}/generated/proxystubs")
-JsonGenerator(CODE INPUT ${JSON_FILE} OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated/json")
-JsonGenerator(CODE INPUT "${CMAKE_CURRENT_SOURCE_DIR}/I*.h" OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated/json")
+ProxyStubGenerator(INPUT "${CMAKE_CURRENT_SOURCE_DIR}" OUTDIR "${CMAKE_CURRENT_BINARY_DIR}/generated/proxystubs" INCLUDE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/..)
+JsonGenerator(CODE INPUT ${JSON_FILE} OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated/json" INCLUDE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/..)
+JsonGenerator(CODE INPUT "${CMAKE_CURRENT_SOURCE_DIR}/I*.h" OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated/json" INCLUDE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
 file(GLOB PROXY_STUB_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/generated/proxystubs/ProxyStubs*.cpp")
-add_library(${TargetMarshalling} SHARED ${PROXY_STUB_SOURCES})
+add_library(${TargetMarshalling} SHARED 
+        Module.cpp
+        ${PROXY_STUB_SOURCES}
+        )
 
 target_include_directories(${TargetMarshalling} PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
 
-file(GLOB JSON_DATA_HEADERS "${CMAKE_CURRENT_BINARY_DIR}/generated/json/JsonData*.h")
 file(GLOB JSON_ENUM_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/generated/json/JsonEnum*.cpp")
 file(GLOB JSON_LINK_HEADERS "${CMAKE_CURRENT_BINARY_DIR}/generated/json/J*.h")
 
 add_library(${TargetDefinitions} SHARED
-        Module.cpp
         Definitions.cpp
         ${JSON_ENUM_SOURCES}
         )
@@ -50,6 +51,10 @@ target_link_libraries(${TargetMarshalling}
           ${NAMESPACE}Tracing::${NAMESPACE}Tracing
           CompileSettingsDebug::CompileSettingsDebug
         )
+
+target_compile_definitions(${TargetMarshalling}
+        PUBLIC
+            PROXYSTUB_BUILDING=1)
 
 target_link_libraries(${TargetDefinitions}
         PUBLIC
@@ -94,6 +99,7 @@ target_include_directories(${TargetDefinitions}
           $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
           $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../>
           $<INSTALL_INTERFACE:include/${NAMESPACE}>
+          $<INSTALL_INTERFACE:include/${NAMESPACE}/interfaces>
         )
 
 install(
@@ -112,13 +118,8 @@ install(
 )
 
 install(
-        FILES ${JSON_DATA_HEADERS}
-        DESTINATION include/${NAMESPACE}/interfaces/json
-)
-
-install(
         FILES ${JSON_LINK_HEADERS}
-        DESTINATION include/${NAMESPACE}/interfaces
+        DESTINATION include/${NAMESPACE}/interfaces/json
 )
 
 InstallPackageConfig(
